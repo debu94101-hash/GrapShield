@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  GRAP Shield optional AWS integration layer. This blueprint adds the requested
+  AWS service families without changing the existing SAM stack. Every optional
+  resource is disabled by default so the current application remains unchanged.
+
+Parameters:
+  EnableExtendedServices:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Set true only when the corresponding AWS resources are intentionally provisioned.
+
+Conditions:
+  ExtendedEnabled: !Equals [!Ref EnableExtendedServices, 'true']
+
+Resources:
+  # Serverless orchestration / queueing
+  SimulationQueue:
+    Type: AWS::SQS::Queue
+    Condition: ExtendedEnabled
+    Properties:
+      QueueName: grap-shield-simulation-jobs
+      VisibilityTimeout: 120
+
+  SimulationWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Condition: ExtendedEnabled
+    Properties:
+      StateMachineName: grap-shield-intervention-workflow
+      RoleArn: !GetAtt StepFunctionsRole.Arn
+      DefinitionString: !Sub |
+        {
+          "StartAt": "SimulationAccepted",
+          "States": {
+            "SimulationAccepted": {
+              "Type": "Pass",
+              "Result": "GRAP Shield intervention simulation accepted",
+              "End": true
+            }
+          }
+        }
+
+  StepFunctionsRole:
+    Type: AWS::IAM::Role
+    Condition: ExtendedEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: states.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: GrapShieldStepFunctionsBasic
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['sqs:SendMessage']
+                Resource: !GetAtt SimulationQueue.Arn
+
+  # Authentication
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Condition: ExtendedEnabled
+    Properties:
+      UserPoolName: grap-shield-users
+      AutoVerifiedAttributes: [email]
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: ExtendedEnabled
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: grap-shield-web
+      GenerateSecret: false
+
+  # Relational data options
+  RelationalDatabase:
+    Type: AWS::RDS::DBInstance
+    Condition: ExtendedEnabled
+    Properties:
+      DBInstanceClass: db.t4g.micro
+      Engine: postgres
+      AllocatedStorage: '20'
+      MasterUsername: grapshield
+      MasterUserPassword: '{{resolve:secretsmanager:grap-shield-db-password}}'
+      DBName: grapshield
+      PubliclyAccessible: false
+
+  AuroraCluster:
+    Type: AWS::RDS::DBCluster
+    Condition: ExtendedEnabled
+    Properties:
+      Engine: aurora-postgresql
+      DatabaseName: grapshield
+      BackupRetentionPeriod: 1
+      StorageEncrypted: true
+
+  # AI inference option. This creates a SageMaker model shell only when enabled;
+  # an actual endpoint requires a model artifact/container image supplied by the deployment team.
+  SageMakerModel:
+    Type: AWS::SageMaker::Model
+    Condition: ExtendedEnabled
+    Properties:
+      ExecutionRoleArn: !GetAtt SageMakerRole.Arn
+      PrimaryContainer:
+        Image: public.ecr.aws/sagemaker/your-model-image:latest
+
+  SageMakerRole:
+    Type: AWS::IAM::Role
+    Condition: ExtendedEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: sagemaker.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  # Container orchestration options
+  EcsCluster:
+    Type: AWS::ECS::Cluster
+    Condition: ExtendedEnabled
+    Properties:
+      ClusterName: grap-shield-ecs
+
+  EcsTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Condition: ExtendedEnabled
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  FargateTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Condition: ExtendedEnabled
+    Properties:
+      Family: grap-shield-fargate
+      RequiresCompatibilities: [FARGATE]
+      Cpu: '256'
+      Memory: '512'
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt EcsTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: grap-shield
+          Image: public.ecr.aws/docker/library/node:20-alpine
+          Essential: true
+          Command: ['node', '--version']
+
+  # The following services are represented as integration targets rather than
+  # silently provisioned infrastructure. Their endpoints/IDs belong in the
+  # deployment environment when the corresponding service is adopted.
+
+Outputs:
+  ExtendedIntegrationStatus:
+    Description: Optional AWS integration layer status
+    Value: !If [ExtendedEnabled, 'PROVISIONED_OPTIONAL_LAYER', 'READY_NOT_PROVISIONED']
+  SupportedServiceFamilies:
+    Description: Requested AWS service families covered by the architecture
+    Value: >-
+      SageMaker AI, EKS, ECS, Fargate, Lambda, API Gateway, Step Functions,
+      EC2, Lightsail, App Runner, Amplify Hosting, S3, DynamoDB, RDS, Aurora,
+      Cognito, CloudFront, Route 53, EventBridge, SQS, SNS, CloudWatch

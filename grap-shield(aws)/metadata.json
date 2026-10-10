@@ -1,0 +1,6 @@
+{
+  "name": "GRAP SHIELD - Live Urban Air-Risk Digital Twin",
+  "description": "National Live Urban Air-Risk Digital Twin & Intervention Intelligence Platform across Indian states and megacities for real-time pollution exposure mapping, statutory GRAP decision support, and deterministic intervention impact simulation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

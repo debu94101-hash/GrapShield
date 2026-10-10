@@ -1,0 +1,123 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  GRAP SHIELD - Live Urban Air-Risk Digital Twin & Intervention Intelligence Platform
+  Production Serverless Deployment for Delhi-NCR Air Exposure Decision Support
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 512
+    Runtime: nodejs20.x
+    Tracing: Active
+    Environment:
+      Variables:
+        TABLE_NAME: !Ref GrapShieldTable
+        S3_BUCKET: !Ref TelemetryBucket
+        SNS_ALERT_TOPIC: !Ref EmergencyAlertsTopic
+
+Resources:
+  # 1. Amazon DynamoDB: Single-Table Architecture (GrapShieldUrbanTwin)
+  GrapShieldTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: GrapShieldUrbanTwin
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: GSI1PK
+          AttributeType: S
+        - AttributeName: GSI1SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI1
+          KeySchema:
+            - AttributeName: GSI1PK
+              KeyType: HASH
+            - AttributeName: GSI1SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+
+  # 2. Amazon S3: Raw Telemetry Data Lake
+  TelemetryBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "grap-shield-telemetry-\${AWS::AccountId}-\${AWS::Region}"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  # 3. Amazon EventBridge: Ingestion Cron Rule (rate 15 minutes)
+  IngestionScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Scheduled trigger for automated air telemetry ingestion
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt IngestionWorkerFunction.Arn
+          Id: IngestionLambdaTarget
+
+  # 4. AWS Lambda: Telemetry Ingestion Worker
+  IngestionWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: grap-shield-ingestion-worker
+      Handler: index.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GrapShieldTable
+        - S3CrudPolicy:
+            BucketName: !Ref TelemetryBucket
+
+  # 5. AWS Lambda: Risk & GRAP Rule Evaluator
+  RiskEvaluatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: grap-shield-risk-evaluator
+      Handler: index.handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref GrapShieldTable
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt EmergencyAlertsTopic.TopicName
+
+  # 6. Amazon SNS: Emergency Alert Topic
+  EmergencyAlertsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: grap-shield-emergency-alerts
+      DisplayName: GRAP Shield Urban Exposure Emergency Dispatch
+
+  # 7. Amazon API Gateway: REST API Gateway
+  GrapShieldApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key'"
+        AllowOrigin: "'*'"
+
+Outputs:
+  ApiEndpoint:
+    Description: Regional API Gateway URL
+    Value: !Sub "https://\${GrapShieldApi}.execute-api.\${AWS::Region}.amazonaws.com/v1"
+  DynamoDBTableName:
+    Description: DynamoDB Single-Table Name
+    Value: !Ref GrapShieldTable
+  TelemetryBucketName:
+    Description: Raw Telemetry S3 Bucket
+    Value: !Ref TelemetryBucket
